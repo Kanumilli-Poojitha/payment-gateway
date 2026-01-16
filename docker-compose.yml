@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -15,6 +17,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - gateway_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_gateway
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway_net
 
   api:
     build:
@@ -24,10 +41,70 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://gateway_user:gateway_pass@postgres:5432/payment_gateway
-      PORT: 8000
+      REDIS_URL: redis://redis:6379             # Must match Redis service
+      WORKER_QUEUE: gateway_jobs                # Queue name shared with worker
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway_net
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: gateway_worker
+    environment:
+      DATABASE_URL: postgresql://gateway_user:gateway_pass@postgres:5432/payment_gateway
+      REDIS_URL: redis://redis:6379
+      WORKER_QUEUE: gateway_jobs                # Matches API
+      DLQ_QUEUE: gateway_jobs_dlq
+      WORKER_MAX_RETRIES: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    networks:
+      - gateway_net
+
+  webhook_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: gateway_webhook_worker
+    command: ["python", "-m", "workers.webhook_worker"]
+    environment:
+      DATABASE_URL: postgresql://gateway_user:gateway_pass@postgres:5432/payment_gateway
+      REDIS_URL: redis://redis:6379
+      WEBHOOK_QUEUE: gateway_webhooks
+      WEBHOOK_DLQ_QUEUE: gateway_webhooks_dlq
+      WEBHOOK_MAX_RETRIES: 3
+    depends_on:
+      - redis
+      - api
+    networks:
+      - gateway_net
+
+  reconciliation_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: gateway_reconciliation_worker
+    command: ["python", "-m", "workers.reconciliation_worker"]
+    environment:
+      DATABASE_URL: postgresql://gateway_user:gateway_pass@postgres:5432/payment_gateway
+      REDIS_URL: redis://redis:6379
+      PROCESSING_THRESHOLD_SEC: 300
+    depends_on:
+      - redis
+      - api
+    networks:
+      - gateway_net
 
   dashboard:
     build:
@@ -37,6 +114,8 @@ services:
       - "3000:80"
     depends_on:
       - api
+    networks:
+      - gateway_net
 
   checkout:
     build:
@@ -46,6 +125,30 @@ services:
       - "3001:80"
     depends_on:
       - api
+    networks:
+      - gateway_net
+
+  refund_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: gateway_refund_worker
+    command: ["python", "-m", "workers.refund_worker"]
+    environment:
+      DATABASE_URL: postgresql://gateway_user:gateway_pass@postgres:5432/payment_gateway
+      REDIS_URL: redis://redis:6379
+      REFUND_QUEUE: gateway_refunds
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - gateway_net
 
 volumes:
   pg_data:
+
+networks:
+  gateway_net:
+    driver: bridge
