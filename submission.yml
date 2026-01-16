@@ -1,0 +1,29 @@
+version: "1.0"
+
+setup:
+  - docker --version
+  - docker-compose --version
+
+start:
+  - docker-compose up -d
+  - sleep 30  # allow DB, Redis, and workers to start fully
+
+test:
+  # enqueue test job
+  - curl -X POST http://localhost:8000/api/v1/test/jobs/enqueue
+  - sleep 5
+  # test payment creation
+  - curl -X POST http://localhost:8000/api/v1/payments \
+    -H "Content-Type: application/json" \
+    -d '{"order_id":"order_test_1","method":"upi","vpa":"user@paytm"}'
+  - sleep 5
+
+verify:
+  - curl -f http://localhost:8000/health
+  - curl -f http://localhost:8000/api/v1/jobs/health
+  - curl -f http://localhost:8000/api/v1/test/jobs/status
+  - curl -f http://localhost:8000/api/v1/orders/public
+  - curl -f http://localhost:8000/api/v1/webhooks?limit=1
+
+shutdown:
+  - docker-compose down
